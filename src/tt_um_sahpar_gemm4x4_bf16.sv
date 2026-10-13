@@ -1,9 +1,12 @@
 `default_nettype none
 
 // ---------------------------------------------------------------------------
-// tt_um_sahpar_gemm4x4 -- Tiny Tapeout top level for the 4x4 integer
-// output-stationary systolic GEMM (step up from the verified 2x2 bring-up,
-// ahead of the 8x8 BF16 array).
+// tt_um_sahpar_gemm4x4_bf16 -- Tiny Tapeout top level for the 4x4 BF16
+// output-stationary systolic GEMM. Same array, scheduler, decoder and host
+// protocol as the int8 tt_um_sahpar_gemm4x4; only the MAC (mac_unit.sv ->
+// bf16_mul + fp_add) and the operand/result widths differ:
+//   operands: BF16, 2 bytes each, low byte first (LOAD_A/B = 32 data bytes)
+//   results : FP32 (4 LE bytes per element, same READ_C addressing)
 //
 // Pin map (same host byte protocol as the 2x2):
 //   ui_in[7:0]  = host_data in   (RX byte)
@@ -18,7 +21,7 @@
 //                             as an interrupt line on the host.
 //   uio[7:6] reserved (inputs)
 // ---------------------------------------------------------------------------
-module tt_um_sahpar_gemm4x4 (
+module tt_um_sahpar_gemm4x4_bf16 (
     input  logic [7:0] ui_in,
     output logic [7:0] uo_out,
     input  logic [7:0] uio_in,
@@ -31,14 +34,12 @@ module tt_um_sahpar_gemm4x4 (
 
     localparam int N      = 4;
     localparam int K      = 4;
-    localparam int DATA_W = 8;
-    // Each signed 8x8 product lies in [-16256, 16384]. 21-bit accumulators
-    // hold any sum of up to 63 products exactly (|sum| <= 1,032,192 < 2^20),
-    // i.e. one CLEAR_GEMM plus up to 14 chained GEMM (accumulate) runs of K=4:
-    // enough to tile matmuls with inner dimension up to 60 (8x8, 16x16,
-    // 32x32, ...) on the host. Readout sign-extends to 32 bits. (Wider
-    // accumulators cost ~10k um^2 in synthesis -- see README.)
-    localparam int ACC_W  = 21;
+    localparam int DATA_W = 16;  // BF16 operands
+    // 16: BF16 accumulator (project spec: "BF16 ADD <- ACC_REG"); the full
+    //     design synthesizes to ~142k um^2 -> fits 6x2 at ~61%.
+    // 32: FP32 accumulator -- far more accurate running sums, but ~221k um^2
+    //     -> needs 8x2 (~71%, tight). Change here + tiles in info.yaml.
+    localparam int ACC_W  = 16;
 
     // ---- RX ----------------------------------------------------------
     logic       rx_byte_valid;
@@ -80,7 +81,8 @@ module tt_um_sahpar_gemm4x4 (
     logic [N*N*ACC_W-1:0]  c_flat;
 
     cmd_decoder #(
-        .N(N), .K(K), .DATA_W(DATA_W), .ACC_W(ACC_W), .CHIP_ID(8'hA4)
+        .N(N), .K(K), .DATA_W(DATA_W), .ACC_W(ACC_W), .CHIP_ID(8'hB4),
+        .C_FLOAT(1'b1)
     ) u_decoder (
         .clk           (clk),
         .rst_n         (rst_n),

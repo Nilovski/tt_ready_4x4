@@ -1,33 +1,36 @@
 # Tiny Tapeout project information
 project:
-  title:        "4x4 integer systolic GEMM"
+  title:        "4x4 BF16 systolic GEMM"
   author:       "Sahpar Nil Ozer, Hasan Unlu"
   discord:      ""
-  description:  "4x4 int8 systolic GEMM with accumulate mode (C = A x B or C += A x B) over an 8-bit byte protocol; hosts tile any-size matmuls onto it."
+  description:  "4x4 BF16 systolic GEMM (BF16 multiply, BF16 accumulate, FP32 readout) with accumulate mode over an 8-bit byte protocol; hosts tile any-size matmuls."
   language:     "SystemVerilog"
   clock_hz:     10000000
 
   # A single tile is about 167x108 uM. Yosys + sky130_fd_sc_hd raw cell area
-  # for this design is ~83,000 um^2 (16 PEs, 8x8 signed multipliers, 21-bit
-  # accumulators). 4x2 (682.64 x 225.76 um = ~154,000 um^2) puts that at ~54%
-  # utilization, comparable to the 2x2 bring-up that hardened cleanly at ~40%.
+  # for this design is ~142,000 um^2 (16 BF16 PEs: 8x8 mantissa multiplier +
+  # BF16 adder each). 6x2 (1030.40 x 225.76 um = ~232,600 um^2) puts that at
+  # ~61% utilization. The FP32-accumulator build (ACC_W=32 in the top) is
+  # ~221,000 um^2 and would need 8x2.
   # Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2 or 8x2
-  tiles: "4x2"
+  tiles: "6x2"
 
   # Your top module name must start with "tt_um_". Make it unique by including your github username:
-  top_module:  "tt_um_sahpar_gemm4x4"
+  top_module:  "tt_um_sahpar_gemm4x4_bf16"
 
   # List your project's source files here.
   # Source files must be in ./src and you must list each source file separately, one per line.
   # Don't forget to also update `PROJECT_SOURCES` in test/Makefile.
   source_files:
-    - "tt_um_sahpar_gemm4x4.sv"
+    - "tt_um_sahpar_gemm4x4_bf16.sv"
     - "rx_byte_interface.sv"
     - "tx_byte_interface.sv"
     - "cmd_decoder.sv"
     - "gemm_top.sv"
     - "systolic_array.sv"
     - "pe.sv"
+    - "bf16_mul.sv"
+    - "fp_add.sv"
     - "mac_unit.sv"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.

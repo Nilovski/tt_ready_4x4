@@ -23,6 +23,9 @@ jobs:
         shell: bash
         run: pip install -r test/requirements.txt
 
+      - name: Bit-exact BF16 unit tests (bf16_mul, fp_add vs exact model)
+        run: python test/fp_unit/run.py 40000
+
       - name: Run tests
         run: |
           cd test

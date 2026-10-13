@@ -7,13 +7,15 @@ FST ?= -fst # Use more efficient FST format
 TOPLEVEL_LANG ?= verilog
 SRC_DIR = $(PWD)/../src
 PROJECT_SOURCES = \
-    tt_um_sahpar_gemm4x4.sv \
+    tt_um_sahpar_gemm4x4_bf16.sv \
     rx_byte_interface.sv \
     tx_byte_interface.sv \
     cmd_decoder.sv \
     gemm_top.sv \
     systolic_array.sv \
     pe.sv \
+    bf16_mul.sv \
+    fp_add.sv \
     mac_unit.sv
 
 ifneq ($(GATES),yes)

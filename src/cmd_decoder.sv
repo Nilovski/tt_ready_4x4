@@ -5,8 +5,9 @@
 // (gemm_top). Same opcode set as the verified 2x2 bring-up, sized by N/K:
 //
 //   0x00  NOP
-//   0x10  LOAD_A          -- followed by N*K data bytes (row-major)
-//   0x11  LOAD_B          -- followed by K*N data bytes (row-major)
+//   0x10  LOAD_A          -- followed by N*K elements, row-major, each
+//                            DATA_W/8 bytes low byte first
+//   0x11  LOAD_B          -- followed by K*N elements, same encoding
 //   0x20  GEMM            -- pulses start (ignored while busy); C += A x B
 //   0x21  CLEAR_GEMM      -- pulses start (ignored while busy); C  = A x B
 //   0x31  READ_C_ELEMENT  -- followed by 1 address byte (0..N*N*4-1),
@@ -38,7 +39,11 @@ module cmd_decoder #(
     parameter int K        = 4,
     parameter int DATA_W   = 8,
     parameter int ACC_W    = 19,
-    parameter logic [7:0] CHIP_ID = 8'hA4
+    parameter logic [7:0] CHIP_ID = 8'hA4,
+    // 0: integer accumulators, sign-extended to 32 bits on readout
+    // 1: float accumulators, left-aligned to FP32 on readout (FP32 as-is,
+    //    BF16 -> {bf16, 16'h0}, which is the exact FP32 value)
+    parameter bit         C_FLOAT = 1'b0
 ) (
     input  logic clk,
     input  logic rst_n,
@@ -105,7 +110,11 @@ module cmd_decoder #(
     assign rd_elem = rx_byte[EW+1:2];
     assign rd_byte = rx_byte[1:0];
     assign rd_acc  = c_flat[rd_elem*ACC_W +: ACC_W];
-    assign rd_word = 32'(rd_acc);                 // sign-extending cast
+    if (C_FLOAT) begin : g_rd_float
+        assign rd_word = 32'(rd_acc) << (32 - ACC_W);
+    end else begin : g_rd_int
+        assign rd_word = 32'(rd_acc);             // sign-extending cast
+    end
     assign rd_data = rd_word[rd_byte*8 +: 8];
 
     // Note: replies are only issued one per command and the host drains each
@@ -197,14 +206,15 @@ module cmd_decoder #(
         end
     end
 
-    // pack operand bytes into gemm_top's flat buses
+    // pack operand bytes into gemm_top's flat buses; multi-byte elements
+    // (DATA_W = 16) arrive low byte first, so byte i lands at bit i*8
     always_comb begin
         a_flat = '0;
         for (int i = 0; i < NUM_A_BYTES; i++)
-            a_flat[i*DATA_W +: DATA_W] = a_bytes[i];
+            a_flat[i*8 +: 8] = a_bytes[i];
         b_flat = '0;
         for (int i = 0; i < NUM_B_BYTES; i++)
-            b_flat[i*DATA_W +: DATA_W] = b_bytes[i];
+            b_flat[i*8 +: 8] = b_bytes[i];
     end
 
     // address bits above the valid range (addr >= NUM_C_BYTES) alias/wrap
