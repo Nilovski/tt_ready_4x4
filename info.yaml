@@ -3,14 +3,14 @@ project:
   title:        "4x4 integer systolic GEMM"
   author:       "Sahpar Nil Ozer, Hasan Unlu"
   discord:      ""
-  description:  "4x4 output-stationary int8 systolic array (C = A x B) behind an 8-bit byte-serial host protocol. Step from the 2x2 bring-up toward an 8x8 BF16 accelerator."
+  description:  "4x4 int8 systolic GEMM with accumulate mode (C = A x B or C += A x B) over an 8-bit byte protocol; hosts tile any-size matmuls onto it."
   language:     "SystemVerilog"
   clock_hz:     10000000
 
   # A single tile is about 167x108 uM. Yosys + sky130_fd_sc_hd raw cell area
-  # for this design is ~80,000 um^2 (16 PEs, 8x8 signed multipliers, 19-bit
-  # accumulators). 4x2 (~154,000 um^2 die) puts that at ~52% utilization,
-  # comparable to the 2x2 bring-up that hardened cleanly at ~40%.
+  # for this design is ~83,000 um^2 (16 PEs, 8x8 signed multipliers, 21-bit
+  # accumulators). 4x2 (682.64 x 225.76 um = ~154,000 um^2) puts that at ~54%
+  # utilization, comparable to the 2x2 bring-up that hardened cleanly at ~40%.
   # Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2 or 8x2
   tiles: "4x2"
 
@@ -59,7 +59,7 @@ pinout:
   uio[2]: "TX_READY"
   uio[3]: "TX_VALID"
   uio[4]: "BUSY"
-  uio[5]: ""
+  uio[5]: "DONE"
   uio[6]: ""
   uio[7]: ""
 

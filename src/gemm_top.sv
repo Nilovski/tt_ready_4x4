@@ -18,6 +18,11 @@
 // no-op for the accumulator.
 //
 // Handshake: pulse start (busy must be low), wait for done, read c_flat.
+//
+// accumulate (sampled with start): 0 -> C = A*B (accumulators cleared on the
+// first cycle); 1 -> C += A*B (accumulators keep their previous value). The
+// accumulate form lets a host compute larger matrices by tiling: sum several
+// K-blocks into the same C block before reading it out.
 // ---------------------------------------------------------------------------
 module gemm_top #(
     parameter int N      = 2,
@@ -37,6 +42,7 @@ module gemm_top #(
     input  logic                    clk,
     input  logic                    rst_n,
     input  logic                    start,
+    input  logic                    accumulate,
     input  logic [N*K*DATA_W-1:0]   a_flat,
     input  logic [K*N*DATA_W-1:0]   b_flat,
     output logic                    busy,
@@ -75,18 +81,21 @@ module gemm_top #(
 
     // ---- run counter ------------------------------------------------------
     logic [CW-1:0] t;
+    logic          acc_run;   // current run accumulates onto the previous C
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
-            busy <= 1'b0;
-            done <= 1'b0;
-            t    <= '0;
+            busy    <= 1'b0;
+            done    <= 1'b0;
+            t       <= '0;
+            acc_run <= 1'b0;
         end else begin
             done <= 1'b0;
             if (!busy) begin
                 if (start) begin
-                    busy <= 1'b1;
-                    t    <= '0;
+                    busy    <= 1'b1;
+                    t       <= '0;
+                    acc_run <= accumulate;
                 end
             end else begin
                 if (t == CW'(T-1)) begin
@@ -122,7 +131,7 @@ module gemm_top #(
     always_ff @(posedge clk)
         if (rst_n && busy)
             $display("cycle t=%0d  a_west=%h  b_north=%h  clr=%b",
-                     t, a_west, b_north, busy && (t == '0));
+                     t, a_west, b_north, busy && (t == '0) && !acc_run);
 `endif
 
     // ---- the array --------------------------------------------------------
@@ -133,7 +142,10 @@ module gemm_top #(
     ) u_array (
         .clk     (clk),
         .rst_n   (rst_n),
-        .clr     (busy && (t == '0)),   // first accumulate cycle overwrites
+        // first cycle of a clearing run overwrites; an accumulating run never
+        // clears (edge inputs are zero until real data arrives, so the extra
+        // cycles add nothing)
+        .clr     (busy && (t == '0) && !acc_run),
         .en      (busy),
         .a_west  (a_west),
         .b_north (b_north),

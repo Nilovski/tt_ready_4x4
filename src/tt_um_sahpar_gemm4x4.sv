@@ -12,8 +12,11 @@
 //   uio[1] = RX_READY   out  (always 1 -- see rx_byte_interface)
 //   uio[2] = TX_READY   in   (host asserts to accept the byte on uo_out)
 //   uio[3] = TX_VALID   out  (chip asserts while uo_out holds an unread byte)
-//   uio[4] = BUSY       out  (GEMM running; STATUS opcode reports the same bit)
-//   uio[7:5] reserved, driven low (inputs)
+//   uio[4] = BUSY       out  (GEMM running; STATUS bit 0)
+//   uio[5] = DONE       out  (sticky: a run finished and C is ready; cleared by
+//                             the next GEMM/CLEAR_GEMM; STATUS bit 1). Usable
+//                             as an interrupt line on the host.
+//   uio[7:6] reserved (inputs)
 // ---------------------------------------------------------------------------
 module tt_um_sahpar_gemm4x4 (
     input  logic [7:0] ui_in,
@@ -29,9 +32,13 @@ module tt_um_sahpar_gemm4x4 (
     localparam int N      = 4;
     localparam int K      = 4;
     localparam int DATA_W = 8;
-    // Clear-then-accumulate of K signed 8x8 products never exceeds
-    // K * 2^14 in magnitude: 2*DATA_W + clog2(K) + 1 bits is overflow-free.
-    localparam int ACC_W  = 2*DATA_W + $clog2(K) + 1;   // 19
+    // Each signed 8x8 product lies in [-16256, 16384]. 21-bit accumulators
+    // hold any sum of up to 63 products exactly (|sum| <= 1,032,192 < 2^20),
+    // i.e. one CLEAR_GEMM plus up to 14 chained GEMM (accumulate) runs of K=4:
+    // enough to tile matmuls with inner dimension up to 60 (8x8, 16x16,
+    // 32x32, ...) on the host. Readout sign-extends to 32 bits. (Wider
+    // accumulators cost ~10k um^2 in synthesis -- see README.)
+    localparam int ACC_W  = 21;
 
     // ---- RX ----------------------------------------------------------
     logic       rx_byte_valid;
@@ -66,7 +73,8 @@ module tt_um_sahpar_gemm4x4 (
     );
 
     // ---- decoder + compute core ----------------------------------------
-    logic                  gemm_start, gemm_busy, gemm_done;
+    logic                  gemm_start, gemm_accumulate, gemm_busy, gemm_done;
+    logic                  result_done;
     logic [N*K*DATA_W-1:0] a_flat;
     logic [K*N*DATA_W-1:0] b_flat;
     logic [N*N*ACC_W-1:0]  c_flat;
@@ -81,11 +89,14 @@ module tt_um_sahpar_gemm4x4 (
         .tx_byte       (tx_byte),
         .tx_byte_valid (tx_byte_valid),
         .tx_ready      (tx_ready),
-        .gemm_start    (gemm_start),
-        .a_flat        (a_flat),
-        .b_flat        (b_flat),
-        .gemm_busy     (gemm_busy),
-        .c_flat        (c_flat)
+        .gemm_start      (gemm_start),
+        .gemm_accumulate (gemm_accumulate),
+        .a_flat          (a_flat),
+        .b_flat          (b_flat),
+        .gemm_busy       (gemm_busy),
+        .gemm_done       (gemm_done),
+        .c_flat          (c_flat),
+        .result_done     (result_done)
     );
 
     gemm_top #(
@@ -94,7 +105,8 @@ module tt_um_sahpar_gemm4x4 (
     ) u_gemm (
         .clk    (clk),
         .rst_n  (rst_n),
-        .start  (gemm_start),
+        .start      (gemm_start),
+        .accumulate (gemm_accumulate),
         .a_flat (a_flat),
         .b_flat (b_flat),
         .busy   (gemm_busy),
@@ -102,10 +114,10 @@ module tt_um_sahpar_gemm4x4 (
         .c_flat (c_flat)
     );
 
-    assign uio_out = {3'b0, gemm_busy, tx_host_valid, 1'b0, rx_host_ready, 1'b0};
-    assign uio_oe  = 8'b0001_1010;   // [4]=BUSY, [3]=TX_VALID, [1]=RX_READY
+    assign uio_out = {2'b0, result_done, gemm_busy, tx_host_valid, 1'b0, rx_host_ready, 1'b0};
+    assign uio_oe  = 8'b0011_1010;   // [5]=DONE, [4]=BUSY, [3]=TX_VALID, [1]=RX_READY
 
-    wire _unused = &{uio_in[7:3], uio_in[1], gemm_done, 1'b0};
+    wire _unused = &{uio_in[7:3], uio_in[1], 1'b0};
 
 endmodule
 

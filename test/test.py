@@ -10,24 +10,12 @@ import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, RisingEdge
 
-N = 4
-K = 4
-
-# uio bit positions
-RX_VALID = 0
-RX_READY = 1
-TX_READY = 2
-TX_VALID = 3
-BUSY = 4
-
-OP_NOP = 0x00
-OP_LOAD_A = 0x10
-OP_LOAD_B = 0x11
-OP_CLEAR_GEMM = 0x21
-OP_READ_C_ELEMENT = 0x31
-OP_STATUS = 0x40
-OP_ID = 0x41
-CHIP_ID = 0xA4
+from gemm_protocol import (  # noqa: F401  (shared with the demo-board runner)
+    BUSY, CHIP_ID, DONE, K, N, OP_CLEAR_GEMM, OP_GEMM, OP_ID, OP_LOAD_A,
+    OP_LOAD_B, OP_NOP, OP_STATUS, RX_READY, TX_VALID,
+    load_matrix, matmul as tiled_matmul, matmul_ref, read_c, recv_byte,
+    send_byte, wait_idle,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -42,62 +30,6 @@ async def reset(dut):
     await ClockCycles(dut.clk, 5)
     dut.rst_n.value = 1
     await ClockCycles(dut.clk, 2)
-
-
-def _set_uio_bit(dut, bit, val):
-    cur = int(dut.uio_in.value)
-    dut.uio_in.value = (cur | (1 << bit)) if val else (cur & ~(1 << bit))
-
-
-async def send_byte(dut, value):
-    """One byte on ui_in with a one-cycle RX_VALID pulse (RX_READY is tied high)."""
-    dut.ui_in.value = value & 0xFF
-    _set_uio_bit(dut, RX_VALID, 1)
-    await RisingEdge(dut.clk)
-    _set_uio_bit(dut, RX_VALID, 0)
-    await RisingEdge(dut.clk)
-
-
-async def recv_byte(dut, timeout_cycles=50):
-    """Wait for TX_VALID, capture uo_out, pulse TX_READY to accept it."""
-    for _ in range(timeout_cycles):
-        await RisingEdge(dut.clk)
-        if int(dut.uio_out.value) & (1 << TX_VALID):
-            byte = int(dut.uo_out.value)
-            _set_uio_bit(dut, TX_READY, 1)
-            await RisingEdge(dut.clk)
-            _set_uio_bit(dut, TX_READY, 0)
-            return byte
-    raise TimeoutError("timed out waiting for TX_VALID")
-
-
-async def load_matrix(dut, opcode, values):
-    await send_byte(dut, opcode)
-    for v in values:
-        await send_byte(dut, v)
-
-
-async def wait_idle(dut, max_polls=40):
-    for _ in range(max_polls):
-        await send_byte(dut, OP_STATUS)
-        if (await recv_byte(dut)) & 0x1 == 0:
-            return
-    raise TimeoutError("GEMM never finished (busy stuck high)")
-
-
-async def read_c(dut):
-    """Read all N*N elements (4 little-endian bytes each), signed 32-bit."""
-    out = []
-    for elem in range(N * N):
-        value = 0
-        for byte_i in range(4):
-            await send_byte(dut, OP_READ_C_ELEMENT)
-            await send_byte(dut, elem * 4 + byte_i)
-            value |= (await recv_byte(dut)) << (8 * byte_i)
-        if value & (1 << 31):
-            value -= 1 << 32
-        out.append(value)
-    return out
 
 
 def matmul(a, b):
@@ -131,7 +63,7 @@ async def run_and_check(dut, a, b, label=""):
 async def test_id(dut):
     """ID replies 0xA4 and the static uio direction bits are right."""
     await reset(dut)
-    assert int(dut.uio_oe.value) == 0b0001_1010, f"uio_oe={int(dut.uio_oe.value):#010b}"
+    assert int(dut.uio_oe.value) == 0b0011_1010, f"uio_oe={int(dut.uio_oe.value):#010b}"
     assert int(dut.uio_out.value) & (1 << RX_READY), "RX_READY should be high"
     await send_byte(dut, OP_ID)
     byte = await recv_byte(dut)
@@ -145,6 +77,7 @@ async def test_status_idle(dut):
     await send_byte(dut, OP_STATUS)
     assert (await recv_byte(dut)) & 0x1 == 0
     assert int(dut.uio_out.value) & (1 << BUSY) == 0
+    assert int(dut.uio_out.value) & (1 << DONE) == 0, "DONE must be low after reset"
 
 
 @cocotb.test()
@@ -243,3 +176,105 @@ async def test_ena_low_ignores_input(dut):
     dut.ena.value = 1
     await send_byte(dut, OP_ID)
     assert await recv_byte(dut) == CHIP_ID
+
+
+@cocotb.test()
+async def test_done_flag(dut):
+    """DONE (pin + STATUS bit 1) is sticky after a run and drops on the next start."""
+    await reset(dut)
+    await load_matrix(dut, OP_LOAD_A, list(range(16)))
+    await load_matrix(dut, OP_LOAD_B, list(range(16)))
+    await send_byte(dut, OP_CLEAR_GEMM)
+    await wait_idle(dut)
+    assert int(dut.uio_out.value) & (1 << DONE), "DONE pin should be high after a run"
+    await send_byte(dut, OP_STATUS)
+    assert await recv_byte(dut) == 0b10, "STATUS should be done=1, busy=0"
+    # still set after unrelated traffic (sticky)
+    await send_byte(dut, OP_ID)
+    await recv_byte(dut)
+    await load_matrix(dut, OP_LOAD_B, [1] * 16)
+    assert int(dut.uio_out.value) & (1 << DONE), "DONE should survive LOAD/ID"
+    # next run clears it while busy
+    await send_byte(dut, OP_GEMM)
+    await send_byte(dut, OP_NOP)
+    v = int(dut.uio_out.value)
+    assert v & (1 << BUSY) and not v & (1 << DONE), f"expected busy & !done mid-run, uio_out={v:#010b}"
+    await wait_idle(dut)
+    assert int(dut.uio_out.value) & (1 << DONE)
+
+
+@cocotb.test()
+async def test_gemm_accumulate(dut):
+    """GEMM (0x20) adds onto C; CLEAR_GEMM (0x21) starts over."""
+    await reset(dut)
+    rng = random.Random(0xACC)
+    a1, b1, a2, b2 = ([rng.randint(-128, 127) for _ in range(16)] for _ in range(4))
+    await run_and_check(dut, a1, b1, "first clear run")
+    await load_matrix(dut, OP_LOAD_A, a2)
+    await load_matrix(dut, OP_LOAD_B, b2)
+    await send_byte(dut, OP_GEMM)
+    await wait_idle(dut)
+    exp = [x + y for x, y in zip(matmul(a1, b1), matmul(a2, b2))]
+    assert await read_c(dut) == exp, "C += A2*B2 mismatch"
+    # CLEAR_GEMM must drop the history
+    await send_byte(dut, OP_CLEAR_GEMM)
+    await wait_idle(dut)
+    assert await read_c(dut) == matmul(a2, b2), "CLEAR_GEMM did not clear"
+
+
+@cocotb.test()
+async def test_accumulate_limit(dut):
+    """15 runs (1 CLEAR + 14 GEMM) of (-128)*(-128)*4 = 983,040 per element: the
+    documented 21-bit limit (60 summed products), read back exactly."""
+    await reset(dut)
+    await load_matrix(dut, OP_LOAD_A, [-128] * 16)
+    await load_matrix(dut, OP_LOAD_B, [-128] * 16)
+    await send_byte(dut, OP_CLEAR_GEMM)
+    await wait_idle(dut)
+    for _ in range(14):
+        await send_byte(dut, OP_GEMM)
+        await wait_idle(dut)
+    got = await read_c(dut)
+    assert got == [15 * 4 * 16384] * 16, f"got {got[:4]}..."
+    # most-negative corner of the same budget: 15 runs of (-128)*127*4
+    await load_matrix(dut, OP_LOAD_B, [127] * 16)
+    await send_byte(dut, OP_CLEAR_GEMM)
+    await wait_idle(dut)
+    for _ in range(14):
+        await send_byte(dut, OP_GEMM)
+        await wait_idle(dut)
+    got = await read_c(dut)
+    assert got == [-15 * 4 * 16256] * 16, f"got {got[:4]}..."
+
+
+@cocotb.test()
+async def test_tiled_8x8(dut):
+    """Full 8x8 int8 matmul on the 4x4 chip via the shared host routine:
+    4 output blocks, each = CLEAR_GEMM + GEMM over 2 K-blocks."""
+    await reset(dut)
+    rng = random.Random(0x88)
+    A = [rng.randint(-128, 127) for _ in range(64)]
+    B = [rng.randint(-128, 127) for _ in range(64)]
+    assert await tiled_matmul(dut, A, B, 8, 8, 8) == matmul_ref(A, B, 8, 8, 8)
+
+
+@cocotb.test()
+async def test_tiled_ragged(dut):
+    """Shapes that are not multiples of 4 (zero padding on the host): 5x7 @ 7x3."""
+    await reset(dut)
+    rng = random.Random(0x573)
+    A = [rng.randint(-128, 127) for _ in range(5 * 7)]
+    B = [rng.randint(-128, 127) for _ in range(7 * 3)]
+    assert await tiled_matmul(dut, A, B, 5, 7, 3) == matmul_ref(A, B, 5, 7, 3)
+
+
+@cocotb.test()
+async def test_tiled_long_k(dut):
+    """Inner dimension 64 = 16 K-blocks: more than the 15 runs the 21-bit
+    accumulator allows, so the host splits it into two on-chip sums. All -128:
+    each element is 64 * 16384 = 1,048,576 = 2^20, one past what 21 signed
+    bits hold -- this only passes if the split really happens."""
+    await reset(dut)
+    A = [-128] * (4 * 64)
+    B = [-128] * (64 * 4)
+    assert await tiled_matmul(dut, A, B, 4, 64, 4) == matmul_ref(A, B, 4, 64, 4)

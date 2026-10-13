@@ -7,10 +7,13 @@
 //   0x00  NOP
 //   0x10  LOAD_A          -- followed by N*K data bytes (row-major)
 //   0x11  LOAD_B          -- followed by K*N data bytes (row-major)
-//   0x21  CLEAR_GEMM      -- pulses start (ignored while busy); C = A x B
+//   0x20  GEMM            -- pulses start (ignored while busy); C += A x B
+//   0x21  CLEAR_GEMM      -- pulses start (ignored while busy); C  = A x B
 //   0x31  READ_C_ELEMENT  -- followed by 1 address byte (0..N*N*4-1),
 //                            replies with that byte of C
-//   0x40  STATUS          -- replies {7'b0, busy}
+//   0x40  STATUS          -- replies {6'b0, done, busy}; done is sticky:
+//                            set when a run finishes, cleared by the next
+//                            GEMM/CLEAR_GEMM (also driven on a pin)
 //   0x41  ID              -- replies CHIP_ID
 //
 // Anything else is ignored.
@@ -25,9 +28,10 @@
 //     since the array is only enabled while busy) instead of being copied
 //     into a 64-byte shadow buffer. Reading during a run returns a partial
 //     sum -- poll STATUS first.
-//   * Accumulators are ACC_W bits (just wide enough to never overflow for
-//     K signed DATA_W x DATA_W products); each element is sign-extended to
-//     32 bits on readout so the host still sees 4 little-endian bytes.
+//   * Accumulators are ACC_W bits; each element is sign-extended to 32 bits
+//     on readout so the host still sees 4 little-endian bytes. With GEMM
+//     (accumulate) the host must keep the total number of summed products
+//     within ACC_W (see top level).
 // ---------------------------------------------------------------------------
 module cmd_decoder #(
     parameter int N        = 4,
@@ -50,10 +54,14 @@ module cmd_decoder #(
 
     // gemm_top
     output logic                  gemm_start,
+    output logic                  gemm_accumulate,
     output logic [N*K*DATA_W-1:0] a_flat,
     output logic [K*N*DATA_W-1:0] b_flat,
     input  logic                  gemm_busy,
-    input  logic [N*N*ACC_W-1:0]  c_flat
+    input  logic                  gemm_done,
+    input  logic [N*N*ACC_W-1:0]  c_flat,
+
+    output logic                  result_done   // sticky DONE flag
 );
 
     localparam int NUM_A_BYTES = N*K*DATA_W/8;
@@ -66,6 +74,7 @@ module cmd_decoder #(
     localparam logic [7:0] OP_NOP            = 8'h00;
     localparam logic [7:0] OP_LOAD_A         = 8'h10;
     localparam logic [7:0] OP_LOAD_B         = 8'h11;
+    localparam logic [7:0] OP_GEMM           = 8'h20;
     localparam logic [7:0] OP_CLEAR_GEMM     = 8'h21;
     localparam logic [7:0] OP_READ_C_ELEMENT = 8'h31;
     localparam logic [7:0] OP_STATUS         = 8'h40;
@@ -109,7 +118,9 @@ module cmd_decoder #(
             a_idx         <= '0;
             b_idx         <= '0;
             load_drop     <= 1'b0;
-            gemm_start    <= 1'b0;
+            gemm_start      <= 1'b0;
+            gemm_accumulate <= 1'b0;
+            result_done     <= 1'b0;
             tx_byte       <= '0;
             tx_byte_valid <= 1'b0;
             for (int i = 0; i < NUM_A_BYTES; i++) a_bytes[i] <= '0;
@@ -117,6 +128,10 @@ module cmd_decoder #(
         end else begin
             gemm_start    <= 1'b0;
             tx_byte_valid <= 1'b0;
+
+            // sticky DONE: set on completion, cleared when a new run is issued
+            if (gemm_done)       result_done <= 1'b1;
+            else if (gemm_start) result_done <= 1'b0;
 
             case (state)
                 S_IDLE: begin
@@ -128,7 +143,7 @@ module cmd_decoder #(
                                 tx_byte_valid <= 1'b1;
                             end
                             OP_STATUS: begin
-                                tx_byte       <= {7'b0, gemm_busy};
+                                tx_byte       <= {6'b0, result_done, gemm_busy};
                                 tx_byte_valid <= 1'b1;
                             end
                             OP_LOAD_A: begin
@@ -141,8 +156,11 @@ module cmd_decoder #(
                                 b_idx     <= '0;
                                 load_drop <= gemm_busy;
                             end
-                            OP_CLEAR_GEMM: begin
-                                if (!gemm_busy) gemm_start <= 1'b1;
+                            OP_GEMM, OP_CLEAR_GEMM: begin
+                                if (!gemm_busy) begin
+                                    gemm_start      <= 1'b1;
+                                    gemm_accumulate <= (rx_byte == OP_GEMM);
+                                end
                             end
                             OP_READ_C_ELEMENT: state <= S_READ_ADDR;
                             default: ;
